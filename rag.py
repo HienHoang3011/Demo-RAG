@@ -48,7 +48,7 @@ def load_generative_model():
 def load_embedding_model():
     embedding_model = SentenceTransformer("namdp-ptit/Vidense")
     return embedding_model
-
+@st.cache_resource
 def load_mongo_collection():
     client = pymongo.MongoClient(mongo_uri)
     db = client['vietnamese-llms']
