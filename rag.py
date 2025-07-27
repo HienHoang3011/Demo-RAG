@@ -66,147 +66,145 @@ def get_embedding(text: str) -> list[float]:
     return embedding
 
 def find_similar_documents_hybrid_search(
-    query_vector: list[float],
+    query_vector: List[float],
     search_query: str,
     limit: int = 10,
     candidates: int = 20,
-    vector_search_index: str = "embedding_search", 
+    vector_search_index: str = "embedding_search",
     atlas_search_index: str = "header_text"
-) -> list[dict]:
+) -> List[Dict[str, Any]]:
     """
-    Hybrid search combining vector and text search with parallel execution.
+    Thực hiện tìm kiếm hybrid kết hợp vector search và text search, chạy song song.
+    Bao gồm cơ chế fallback nếu tìm kiếm hybrid thất bại.
     """
     all_results = []
     collection = load_mongo_collection()
-    def perform_vector_search():
-        """Perform vector search in parallel."""
+    # Hàm con cho vector search
+    def perform_vector_search() -> list:
         try:
             vector_pipeline = [
-                {
-                    "$vectorSearch": {
-                        "index": vector_search_index,
-                        "path": "embedding",
-                        "queryVector": query_vector,
-                        "limit": limit,
-                        "numCandidates": candidates
-                    }
-                },
-                {
-                    "$project": {
-                        '_id': 1,
-                        'header' : 1,
-                        'content': 1,
-                        "vector_score": {"$meta": "vectorSearchScore"}
-                    }
-                }
+                {"$vectorSearch": {
+                    "index": vector_search_index,
+                    "path": "embedding",
+                    "queryVector": query_vector,
+                    "limit": limit,
+                    "numCandidates": candidates
+                }},
+                {"$project": {
+                    '_id': 1, 'header': 1, 'content': 1, 'uuid': 1,
+                    "vector_score": {"$meta": "vectorSearchScore"}
+                }}
             ]
-
             vector_results = list(collection.aggregate(vector_pipeline))
-            safe_log_info(f"Vector search returned {len(vector_results)} results")
+            safe_log_info(f"Vector search trả về {len(vector_results)} kết quả")
             for doc in vector_results:
-                doc['search_type'] = 'vector'
-                doc['combined_score'] = doc.get('vector_score', 0) * 0.6  # Weight vector score
+                doc['combined_score'] = doc.get('vector_score', 0) * 0.6
             return vector_results
         except Exception as e:
-           safe_log_warning(f"Vector search failed: {e}")
-           return []
-
-    def perform_text_search():
-        """Perform text search in parallel."""
-        if not search_query or not search_query.strip():
+            safe_log_warning(f"Vector search thất bại: {e}")
             return []
 
+    # Hàm con cho text search
+    def perform_text_search() -> list:
+        if not search_query or not search_query.strip():
+            return []
         try:
             text_pipeline = [
-                {
-                    "$search": {
-                        "index": atlas_search_index,
-                        "compound": {
-                            "must": [
-                                {
-                                    "text": {
-                                        "query": search_query,
-                                        "path": ["header", "content"]
-                                    }
-                                }
-                            ]
-                        }
+                {"$search": {
+                    "index": atlas_search_index,
+                    "text": { # Đơn giản hóa từ compound sang text nếu chỉ có một điều kiện
+                        "query": search_query,
+                        "path": ["header", "content"] # Thêm keywords vào path
                     }
-                },
-                {
-                    "$project": {
-                        '_id': 1,
-                        'header': 1,
-                        'content': 1,
-                        "text_score": {"$meta": "searchScore"}
-                    }
-                }
+                }},
+                {"$project": {
+                    '_id': 1, 'header': 1, 'content': 1, 'uuid': 1, 'keywords': 1,
+                    "text_score": {"$meta": "searchScore"}
+                }}
             ]
-
             text_results = list(collection.aggregate(text_pipeline))
-            safe_log_info(f"Text search returned {len(text_results)} results")
+            safe_log_info(f"Text search trả về {len(text_results)} kết quả")
             for doc in text_results:
-                doc['search_type'] = 'text'
-                doc['combined_score'] = doc.get('text_score', 0) * 0.4  # Weight text score
+                # Gán trọng số 0.3 cho điểm text search
+                doc['combined_score'] = doc.get('text_score', 0) * 0.4
             return text_results
         except Exception as e:
-            safe_log_warning(f"Text search failed: {e}")
+            safe_log_warning(f"Text search thất bại: {e}")
             return []
 
     try:
-        # Run both searches in parallel
+        # 1. Chạy song song hai truy vấn
         start_time = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            vector_future = executor.submit(perform_vector_search)
-            text_future = executor.submit(perform_text_search)
-
-            # Collect results as they complete
-            for future in as_completed([vector_future, text_future]):
+            future_to_search = {
+                executor.submit(perform_vector_search): "vector",
+                executor.submit(perform_text_search): "text"
+            }
+            for future in as_completed(future_to_search):
                 try:
                     results = future.result()
                     all_results.extend(results)
                 except Exception as e:
-                    safe_log_error(f"Error in parallel search: {e}")
+                    safe_log_error(f"Lỗi trong quá trình tìm kiếm song song: {e}")
 
         search_time = time.time() - start_time
-        safe_log_info(f"Parallel search completed in {search_time:.3f}s")
+        safe_log_info(f"Tìm kiếm song song hoàn tất trong {search_time:.3f}s")
 
-        # 3. Merge và deduplicate results
-        seen_ids = set()
-        merged_results = []
-
+        # 2. Hợp nhất và loại bỏ trùng lặp (Tối ưu hóa)
+        merged_map = {}
         for doc in all_results:
-            doc_id = str(doc['_id'])
-            if doc_id not in seen_ids:
-                seen_ids.add(doc_id)
-                # Clean up the document for final result
-                final_doc = {
-                    '_id': doc['_id'],
-                    'content': doc.get('content', ''),
-                    # 'uploader_username': doc.get('uploader_username', ''), # Removed
-                    'header': doc.get('header', ''),
-                    'score': doc.get('combined_score', 0)
-                }
-                merged_results.append(final_doc)
+            doc_id = doc['_id']
+            if doc_id not in merged_map:
+                merged_map[doc_id] = doc
             else:
-                # If document already exists, boost its score
-                for existing_doc in merged_results:
-                    if str(existing_doc['_id']) == doc_id:
-                        existing_doc['score'] += doc.get('combined_score', 0) * 0.5
-                        break
+                # Nếu tài liệu đã tồn tại, cộng dồn điểm số
+                merged_map[doc_id]['combined_score'] += doc['combined_score']
 
-        # Sort by combined score
-        merged_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        # Chuyển map thành list
+        merged_results = list(merged_map.values())
 
-        # Return top results
+        # 3. Sắp xếp theo điểm số tổng hợp
+        merged_results.sort(key=lambda x: x.get('combined_score', 0), reverse=True)
+
         final_results = merged_results[:limit]
-        safe_log_info(f"Hybrid search final results: {len(final_results)} documents")
+        safe_log_info(f"Tìm kiếm hybrid trả về: {len(final_results)} tài liệu")
 
-        return final_results
+        return [{
+            '_id': r['_id'],
+            'header': r.get('header', ''),
+            'content': r.get('content', ''),
+            'uuid': r.get('uuid', ''),
+            'score': r.get('combined_score', 0)
+        } for r in final_results]
 
     except Exception as e:
-        safe_log_error(f"Error in hybrid search: {e}", exc_info=True)
+        safe_log_error(f"Lỗi nghiêm trọng trong hàm hybrid search: {e}", exc_info=True)
 
+        # ----- PHẦN FALLBACK ĐÃ SỬA -----
+        safe_log_warning("Thực hiện fallback: chỉ tìm kiếm bằng Text Search.")
+        try:
+            # Thực hiện lại một truy vấn text search đơn giản
+            fallback_pipeline = [
+                {"$search": {
+                    "index": atlas_search_index,
+                    "text": {
+                        "query": search_query,
+                        "path": ["header", "content", "keywords"]
+                    }
+                }},
+                {"$project": {
+                    '_id': 1, 'header': 1, 'content': 1, 'uuid': 1,
+                    'score': {"$meta": "searchScore"}
+                }},
+                {"$limit": limit}
+            ]
+            fallback_results = list(collection.aggregate(fallback_pipeline))
+            safe_log_info(f"Fallback search trả về {len(fallback_results)} kết quả.")
+            return fallback_results
+        except Exception as fallback_e:
+            safe_log_error(f"Fallback search cũng thất bại: {fallback_e}", exc_info=True)
+            return [] # Trả về list rỗng nếu cả fallback cũng lỗi
+        
 def rerank_documents(query: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Reranks a list of documents based on their relevance to the query using a reranker model.
@@ -244,8 +242,13 @@ def get_answer_with_rag(query:str) -> str:
     
     revised_template = ChatPromptTemplate.from_messages([
     ('system', """bạn là một trợ lý AI thân thiện, được thiết kế để giúp khám phá mọi điều về Học viện Bưu chính Viễn thông (PTIT).
-        Bạn sẽ sử dụng thông tin được cung cấp để trả lời các câu hỏi của người dùng một cách chi tiết và dễ hiểu nhất.
-        Hãy nhớ rằng, bạn chỉ có thể trả lời dựa trên thông tin bạn cung cấp. Nếu câu hỏi nằm ngoài phạm vi thông tin đó, bạn sẽ cho người dùng biết."""),
+
+    QUY TẮC BẮT BUỘC:
+    1.  **Quy đổi cơ sở:** Nếu thông tin tham khảo có đề cập đến "cơ sở TP.HCM" hay "cơ sở Hồ Chí Minh", bạn phải tự động quy đổi và trình bày thông tin đó như thể nó thuộc về "cơ sở Hà Đông".
+    2.  **Phạm vi trả lời:** Bạn sẽ sử dụng thông tin được cung cấp trong ngữ cảnh để trả lời câu hỏi của người dùng một cách chi tiết và dễ hiểu nhất.
+        - Nếu người dùng đặt câu hỏi cụ thể, hãy trả lời dựa vào ngữ cảnh.
+        - Nếu câu hỏi nằm ngoài phạm vi thông tin đó, bạn phải nói rõ rằng bạn không có thông tin.
+        - Nếu người dùng chỉ giao tiếp xã giao (ví dụ: "xin chào", "bạn là ai?"), hãy phản hồi một cách thân thiện với vai trò là trợ lý PTIT và sẵn sàng giúp đỡ, không trích xuất thông tin từ ngữ cảnh trừ khi được hỏi."""),
     ('human', "Thông tin tham khảo:\n```\n{context}\n```\n\nCâu hỏi của tôi:\n{question}")
     ])
     llm = load_generative_model()
