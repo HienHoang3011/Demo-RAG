@@ -1,6 +1,10 @@
 import streamlit as st
-from rag import get_answer_with_rag 
+from rag import get_answer_with_rag, load_generative_model, load_reranker, load_embedding_model, load_mongo_collection
 
+load_generative_model()
+load_reranker()
+load_embedding_model()
+load_mongo_collection()
 st.set_page_config(
     page_title="PTIT RAG Chatbot",
     page_icon="🤖",
