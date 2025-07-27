@@ -1,6 +1,15 @@
 import streamlit as st
 from rag import get_answer_with_rag, load_generative_model, load_reranker, load_embedding_model, load_mongo_collection
+import streamlit as st
+from huggingface_hub import login
 
+if "HUGGINGFACEHUB_API_TOKEN" in st.secrets:
+    # Lấy token từ secrets và đăng nhập
+    hf_token = st.secrets["HUGGINGFACEHUB_API_TOKEN"]
+    login(token=hf_token)
+    print("Đã đăng nhập Hugging Face thành công!")
+else:
+    print("Không tìm thấy Hugging Face token.")
 load_generative_model()
 load_reranker()
 load_embedding_model()
