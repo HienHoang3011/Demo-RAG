@@ -13,6 +13,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableMap
 import time
+import streamlit as st
 
 def safe_log_info(message):
     print(f"INFO: {message}")
@@ -28,8 +29,8 @@ def safe_log_error(message, exc_info=False):
         safe_log_error("Error occurred during logging", exc_info=True)
 
 load_dotenv()
-google_api_key = os.getenv("GOOGLE_API_KEY")
-mongo_uri = os.getenv("MONGODB_URI")
+google_api_key = st.secrets['GOOGLE_API_KEY']
+mongo_uri = st.secrets['MONGODB_URI']
 
 @st.cache_resource
 def load_generative_model():
